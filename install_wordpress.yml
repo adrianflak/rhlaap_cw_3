@@ -1,0 +1,134 @@
+---
+- name: Install Nginx PHP MySQL and WordPress
+  hosts: all
+  become: true
+
+  vars:
+    wordpress_db_name: wordpress
+    wordpress_db_user: wpuser
+    wordpress_db_password: RedHat123!
+    wordpress_root: /var/www/wordpress
+    wordpress_url: https://wordpress.org/latest.tar.gz
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.dnf:
+        name:
+          - nginx
+          - mariadb-server
+          - php
+          - php-fpm
+          - php-mysqlnd
+          - php-gd
+          - php-xml
+          - php-mbstring
+          - tar
+          - curl
+          - python3-PyMySQL
+        state: present
+
+    - name: Start and enable services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - nginx
+        - mariadb
+        - php-fpm
+
+    - name: Create WordPress database
+      community.mysql.mysql_db:
+        name: "{{ wordpress_db_name }}"
+        state: present
+        login_unix_socket: /var/lib/mysql/mysql.sock
+
+    - name: Create WordPress database user
+      community.mysql.mysql_user:
+        name: "{{ wordpress_db_user }}"
+        password: "{{ wordpress_db_password }}"
+        priv: "{{ wordpress_db_name }}.*:ALL"
+        host: localhost
+        state: present
+        login_unix_socket: /var/lib/mysql/mysql.sock
+
+    - name: Create WordPress directory
+      ansible.builtin.file:
+        path: "{{ wordpress_root }}"
+        state: directory
+        owner: nginx
+        group: nginx
+        mode: "0755"
+
+    - name: Download WordPress
+      ansible.builtin.get_url:
+        url: "{{ wordpress_url }}"
+        dest: /tmp/wordpress.tar.gz
+        mode: "0644"
+
+    - name: Extract WordPress
+      ansible.builtin.unarchive:
+        src: /tmp/wordpress.tar.gz
+        dest: /var/www/
+        remote_src: true
+        creates: "{{ wordpress_root }}/index.php"
+
+    - name: Set ownership
+      ansible.builtin.file:
+        path: "{{ wordpress_root }}"
+        owner: nginx
+        group: nginx
+        recurse: true
+
+    - name: Copy wp-config.php
+      ansible.builtin.copy:
+        dest: "{{ wordpress_root }}/wp-config.php"
+        owner: nginx
+        group: nginx
+        mode: "0644"
+        content: |
+          <?php
+          define( 'DB_NAME', '{{ wordpress_db_name }}' );
+          define( 'DB_USER', '{{ wordpress_db_user }}' );
+          define( 'DB_PASSWORD', '{{ wordpress_db_password }}' );
+          define( 'DB_HOST', 'localhost' );
+          define( 'DB_CHARSET', 'utf8' );
+          define( 'DB_COLLATE', '' );
+          $table_prefix = 'wp_';
+          define( 'WP_DEBUG', false );
+          if ( ! defined( 'ABSPATH' ) ) {
+              define( 'ABSPATH', __DIR__ . '/' );
+          }
+          require_once ABSPATH . 'wp-settings.php';
+
+    - name: Configure Nginx for WordPress
+      ansible.builtin.template:
+        src: templates/wordpress.conf.j2
+        dest: /etc/nginx/conf.d/wordpress.conf
+      notify: Restart nginx
+
+    - name: Remove default Nginx config if exists
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/default.conf
+        state: absent
+      notify: Restart nginx
+
+    - name: Allow HTTP service in firewall
+      ansible.posix.firewalld:
+        service: http
+        permanent: true
+        state: enabled
+        immediate: true
+      ignore_errors: true
+
+    - name: Set SELinux context for WordPress
+      ansible.builtin.command:
+        cmd: restorecon -Rv {{ wordpress_root }}
+      changed_when: false
+      ignore_errors: true
+
+  handlers:
+    - name: Restart nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
